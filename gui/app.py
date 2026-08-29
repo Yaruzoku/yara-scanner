@@ -7,8 +7,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from yara_scanner.rules import (
     find_rule_files,
-    compile_rules,
-    count_rules
+    compile_rules
 )
 
 from yara_scanner.scanner import scan_target
