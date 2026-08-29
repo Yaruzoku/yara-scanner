@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Build / distribution
+build/
+dist/
+
+# PyInstaller
+*.spec
+
+# IDE
+.idea/
+
+# Icons / generated assets
+*.ico
+
+# Logs
+*.log
