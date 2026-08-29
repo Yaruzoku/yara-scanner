@@ -1,0 +1,291 @@
+Index: yara-scan.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>import yara\r\nimport argparse\r\nimport hashlib\r\nimport json\r\nimport os\r\nimport re\r\nimport fnmatch\r\nimport time\r\nfrom datetime import datetime, timezone\r\nfrom colorama import Fore, init\r\n\r\n\r\ninit(autoreset=True)\r\n\r\n\r\nSCANNER_NAME = \"Yara Scanner\"\r\nSCANNER_VERSION = \"0.1.0\"\r\n\r\n\r\ndef calculate_sha256(file_path):\r\n    sha256 = hashlib.sha256()\r\n\r\n    with open(file_path, \"rb\") as file:\r\n        while chunk := file.read(4096):\r\n            sha256.update(chunk)\r\n\r\n    return sha256.hexdigest()\r\n\r\n\r\ndef find_rule_files(rules_directory):\r\n    rule_files = []\r\n\r\n    for root, dirs, files in os.walk(rules_directory):\r\n\r\n        for filename in files:\r\n\r\n            if filename.lower().endswith((\".yar\", \".yara\")):\r\n\r\n                rule_files.append(\r\n                    os.path.abspath(\r\n                        os.path.join(root, filename)\r\n                    )\r\n                )\r\n\r\n    return sorted(rule_files)\r\n\r\n\r\ndef find_includes(rule_file):\r\n    includes = set()\r\n\r\n    try:\r\n\r\n        with open(\r\n            rule_file,\r\n            \"r\",\r\n            encoding=\"utf-8\"\r\n        ) as file:\r\n\r\n            source = file.read()\r\n\r\n    except (OSError, UnicodeDecodeError):\r\n\r\n        return includes\r\n\r\n    pattern = r'include\\s+[\"\\']([^\"\\']+)[\"\\']'\r\n\r\n    for match in re.finditer(\r\n        pattern,\r\n        source,\r\n        re.IGNORECASE\r\n    ):\r\n\r\n        requested_file = match.group(1)\r\n\r\n        include_path = os.path.abspath(\r\n            os.path.join(\r\n                os.path.dirname(rule_file),\r\n                requested_file\r\n            )\r\n        )\r\n\r\n        includes.add(include_path)\r\n\r\n    return includes\r\n\r\n\r\ndef find_dependencies(rule_files):\r\n    dependencies = set()\r\n    pending = list(rule_files)\r\n    checked = set()\r\n\r\n    while pending:\r\n\r\n        rule_file = os.path.abspath(\r\n            pending.pop()\r\n        )\r\n\r\n        if rule_file in checked:\r\n            continue\r\n\r\n        checked.add(rule_file)\r\n\r\n        includes = find_includes(rule_file)\r\n\r\n        for include_file in includes:\r\n\r\n            if include_file in dependencies:\r\n                continue\r\n\r\n            dependencies.add(include_file)\r\n\r\n            if os.path.isfile(include_file):\r\n                pending.append(include_file)\r\n\r\n    return dependencies\r\n\r\n\r\ndef include_callback(\r\n    requested_file,\r\n    filename,\r\n    namespace\r\n):\r\n\r\n    try:\r\n\r\n        include_path = os.path.abspath(\r\n            os.path.join(\r\n                os.path.dirname(filename),\r\n                requested_file\r\n            )\r\n        )\r\n\r\n        with open(\r\n            include_path,\r\n            \"r\",\r\n            encoding=\"utf-8\"\r\n        ) as file:\r\n\r\n            return file.read()\r\n\r\n    except (OSError, UnicodeDecodeError) as error:\r\n\r\n        raise yara.Error(\r\n            f\"Failed to include \"\r\n            f\"'{requested_file}': {error}\"\r\n        )\r\n\r\n\r\ndef compile_rules(rule_files, quiet=False):\r\n\r\n    rules = []\r\n\r\n    dependencies = find_dependencies(\r\n        rule_files\r\n    )\r\n\r\n    standalone_files = [\r\n        rule_file\r\n        for rule_file in rule_files\r\n        if rule_file not in dependencies\r\n    ]\r\n\r\n    for rule_file in standalone_files:\r\n\r\n        try:\r\n\r\n            compiled = yara.compile(\r\n                filepath=rule_file,\r\n                include_callback=include_callback\r\n            )\r\n\r\n            rules.append({\r\n                \"compiled\": compiled,\r\n                \"file\": rule_file\r\n            })\r\n\r\n            if not quiet:\r\n\r\n                print(\r\n                    f\"[+] Loaded rule file: \"\r\n                    f\"{os.path.relpath(rule_file)}\"\r\n                )\r\n\r\n        except (\r\n            OSError,\r\n            UnicodeDecodeError,\r\n            yara.Error\r\n        ) as error:\r\n\r\n            if not quiet:\r\n\r\n                print(\r\n                    Fore.RED\r\n                    + f\"[!] Failed to load: \"\r\n                    f\"{os.path.relpath(rule_file)}\"\r\n                )\r\n\r\n                print(\r\n                    Fore.RED\r\n                    + f\"    Error: {error}\"\r\n                )\r\n\r\n    if dependencies and not quiet:\r\n\r\n        print()\r\n\r\n        print(\r\n            f\"Included dependencies: \"\r\n            f\"{len(dependencies)}\"\r\n        )\r\n\r\n        for dependency in sorted(\r\n            dependencies\r\n        ):\r\n\r\n            print(\r\n                f\"    └── \"\r\n                f\"{os.path.relpath(dependency)}\"\r\n            )\r\n\r\n    return rules\r\n\r\n\r\ndef scan_file(\r\n    rules,\r\n    file_path,\r\n    hash_all=False\r\n):\r\n\r\n    scan_start = time.perf_counter()\r\n\r\n    try:\r\n\r\n        all_matches = []\r\n\r\n        for rule_set in rules:\r\n\r\n            matches = rule_set[\"compiled\"].match(\r\n                file_path\r\n            )\r\n\r\n            for match in matches:\r\n\r\n                all_matches.append({\r\n                    \"match\": match,\r\n                    \"source\": rule_set[\"file\"]\r\n                })\r\n\r\n        matched = len(all_matches) > 0\r\n\r\n        file_hash = None\r\n\r\n        if matched or hash_all:\r\n\r\n            file_hash = calculate_sha256(\r\n                file_path\r\n            )\r\n\r\n        file_size = os.path.getsize(\r\n            file_path\r\n        )\r\n\r\n        scan_duration = (\r\n            time.perf_counter()\r\n            - scan_start\r\n        )\r\n\r\n        result = {\r\n            \"file\": file_path,\r\n            \"size\": file_size,\r\n            \"sha256\": file_hash,\r\n            \"matched\": matched,\r\n            \"scan_duration_seconds\": round(\r\n                scan_duration,\r\n                4\r\n            ),\r\n            \"rules\": []\r\n        }\r\n\r\n        for match_data in all_matches:\r\n\r\n            match = match_data[\"match\"]\r\n            source = match_data[\"source\"]\r\n\r\n            rule_data = {\r\n                \"name\": match.rule,\r\n                \"source\": source,\r\n                \"meta\": match.meta,\r\n                \"strings\": []\r\n            }\r\n\r\n            for string_match in match.strings:\r\n\r\n                for instance in string_match.instances:\r\n\r\n                    rule_data[\"strings\"].append({\r\n                        \"identifier\":\r\n                            string_match.identifier,\r\n\r\n                        \"offset\":\r\n                            instance.offset,\r\n\r\n                        \"data\":\r\n                            instance.matched_data.decode(\r\n                                \"utf-8\",\r\n                                errors=\"replace\"\r\n                            )\r\n                    })\r\n\r\n            result[\"rules\"].append(\r\n                rule_data\r\n            )\r\n\r\n        return result\r\n\r\n    except (OSError, yara.Error) as error:\r\n\r\n        scan_duration = (\r\n            time.perf_counter()\r\n            - scan_start\r\n        )\r\n\r\n        return {\r\n            \"file\": file_path,\r\n            \"error\": str(error),\r\n            \"scan_duration_seconds\": round(\r\n                scan_duration,\r\n                4\r\n            )\r\n        }\r\n\r\n\r\ndef collect_files(\r\n    target,\r\n    exclude_patterns=None\r\n):\r\n\r\n    files = []\r\n    excluded = []\r\n\r\n    if exclude_patterns is None:\r\n        exclude_patterns = []\r\n\r\n    def should_exclude(path):\r\n\r\n        normalized_path = os.path.normpath(\r\n            path\r\n        )\r\n\r\n        filename = os.path.basename(\r\n            path\r\n        )\r\n\r\n        for pattern in exclude_patterns:\r\n\r\n            if fnmatch.fnmatch(\r\n                filename,\r\n                pattern\r\n            ):\r\n                return True\r\n\r\n            if fnmatch.fnmatch(\r\n                normalized_path,\r\n                pattern\r\n            ):\r\n                return True\r\n\r\n            path_parts = normalized_path.split(\r\n                os.sep\r\n            )\r\n\r\n            if any(\r\n                fnmatch.fnmatch(\r\n                    part,\r\n                    pattern\r\n                )\r\n                for part in path_parts\r\n            ):\r\n                return True\r\n\r\n        return False\r\n\r\n    if os.path.isfile(target):\r\n\r\n        if should_exclude(target):\r\n\r\n            excluded.append(target)\r\n\r\n        else:\r\n\r\n            files.append(target)\r\n\r\n    elif os.path.isdir(target):\r\n\r\n        for root, dirs, filenames in os.walk(target):\r\n\r\n            dirs[:] = [\r\n                directory\r\n                for directory in dirs\r\n                if not should_exclude(\r\n                    os.path.join(\r\n                        root,\r\n                        directory\r\n                    )\r\n                )\r\n            ]\r\n\r\n            for filename in filenames:\r\n\r\n                file_path = os.path.join(\r\n                    root,\r\n                    filename\r\n                )\r\n\r\n                if should_exclude(file_path):\r\n\r\n                    excluded.append(\r\n                        file_path\r\n                    )\r\n\r\n                else:\r\n\r\n                    files.append(\r\n                        file_path\r\n                    )\r\n\r\n    return files, excluded\r\n\r\n\r\ndef print_match(result):\r\n\r\n    print()\r\n\r\n    print(\r\n        Fore.RED\r\n        + \"=\" * 50\r\n    )\r\n\r\n    print(\r\n        Fore.RED\r\n        + f\"[!] MATCH: {result['file']}\"\r\n    )\r\n\r\n    print(\r\n        Fore.RED\r\n        + f\"    Size:   \"\r\n        f\"{result['size']:,} bytes\"\r\n    )\r\n\r\n    if result[\"sha256\"]:\r\n\r\n        print(\r\n            Fore.RED\r\n            + f\"    SHA256: \"\r\n            f\"{result['sha256']}\"\r\n        )\r\n\r\n    print(\r\n        Fore.RED\r\n        + f\"    Scan time: \"\r\n        f\"{result['scan_duration_seconds']:.4f} seconds\"\r\n    )\r\n\r\n    for rule in result[\"rules\"]:\r\n\r\n        print(\r\n            Fore.RED\r\n            + f\"\\n    Rule: \"\r\n            f\"{rule['name']}\"\r\n        )\r\n\r\n        print(\r\n            Fore.RED\r\n            + f\"    Rule file: \"\r\n            f\"{rule['source']}\"\r\n        )\r\n\r\n        if rule[\"meta\"]:\r\n\r\n            print(\r\n                Fore.RED\r\n                + \"    Metadata:\"\r\n            )\r\n\r\n            for key, value in (\r\n                rule[\"meta\"].items()\r\n            ):\r\n\r\n                print(\r\n                    Fore.RED\r\n                    + f\"        {key}: {value}\"\r\n                )\r\n\r\n        for string_match in (\r\n            rule[\"strings\"]\r\n        ):\r\n\r\n            print(\r\n                Fore.RED\r\n                + f\"        String: \"\r\n                f\"{string_match['identifier']}\"\r\n            )\r\n\r\n            print(\r\n                Fore.RED\r\n                + f\"        Offset: \"\r\n                f\"{string_match['offset']:#x}\"\r\n            )\r\n\r\n            print(\r\n                Fore.RED\r\n                + f\"        Data:   \"\r\n                f\"{string_match['data']!r}\"\r\n            )\r\n\r\n    print(\r\n        Fore.RED\r\n        + \"=\" * 50\r\n    )\r\n\r\n\r\ndef print_clean(result, verbose):\r\n\r\n    if not verbose:\r\n\r\n        print(\r\n            f\"[OK] {result['file']}\"\r\n        )\r\n\r\n        return\r\n\r\n    print()\r\n\r\n    print(\"=\" * 50)\r\n    print(\"YARA SCAN\")\r\n    print(\"=\" * 50)\r\n\r\n    print(\r\n        f\"File:   {result['file']}\"\r\n    )\r\n\r\n    print(\r\n        f\"Size:   \"\r\n        f\"{result['size']:,} bytes\"\r\n    )\r\n\r\n    if result[\"sha256\"]:\r\n\r\n        print(\r\n            f\"SHA256: \"\r\n            f\"{result['sha256']}\"\r\n        )\r\n\r\n    else:\r\n\r\n        print(\r\n            \"SHA256: \"\r\n            \"not calculated\"\r\n        )\r\n\r\n    print(\r\n        f\"Scan time: \"\r\n        f\"{result['scan_duration_seconds']:.4f} seconds\"\r\n    )\r\n\r\n    print(\r\n        \"\\n[-] No matches found.\"\r\n    )\r\n\r\n\r\ndef print_error(result):\r\n\r\n    print(\r\n        Fore.RED\r\n        + f\"[!] FAILED: {result['file']}\"\r\n    )\r\n\r\n    print(\r\n        Fore.RED\r\n        + f\"    Error: {result['error']}\"\r\n    )\r\n\r\n    if \"scan_duration_seconds\" in result:\r\n\r\n        print(\r\n            Fore.RED\r\n            + f\"    Scan time: \"\r\n            f\"{result['scan_duration_seconds']:.4f} seconds\"\r\n        )\r\n\r\n\r\ndef create_summary(\r\n    results,\r\n    files_found,\r\n    files_excluded\r\n):\r\n\r\n    files_scanned = len(results)\r\n\r\n    files_matched = sum(\r\n        1\r\n        for result in results\r\n        if \"error\" not in result\r\n        and result[\"matched\"]\r\n    )\r\n\r\n    rules_triggered = sum(\r\n        len(result[\"rules\"])\r\n        for result in results\r\n        if \"error\" not in result\r\n    )\r\n\r\n    files_failed = sum(\r\n        1\r\n        for result in results\r\n        if \"error\" in result\r\n    )\r\n\r\n    return {\r\n        \"files_found\": files_found,\r\n        \"files_scanned\": files_scanned,\r\n        \"files_excluded\": files_excluded,\r\n        \"files_matched\": files_matched,\r\n        \"rules_triggered\": rules_triggered,\r\n        \"files_failed\": files_failed\r\n    }\r\n\r\n\r\ndef create_rule_statistics(results):\r\n\r\n    statistics = {}\r\n\r\n    for result in results:\r\n\r\n        if \"error\" in result:\r\n            continue\r\n\r\n        for rule in result[\"rules\"]:\r\n\r\n            rule_name = rule[\"name\"]\r\n\r\n            statistics[rule_name] = (\r\n                statistics.get(\r\n                    rule_name,\r\n                    0\r\n                )\r\n                + 1\r\n            )\r\n\r\n    return dict(\r\n        sorted(\r\n            statistics.items(),\r\n            key=lambda item: (\r\n                -item[1],\r\n                item[0].lower()\r\n            )\r\n        )\r\n    )\r\n\r\n\r\ndef make_relative_path(\r\n    path,\r\n    base_directory\r\n):\r\n\r\n    return os.path.relpath(\r\n        path,\r\n        base_directory\r\n    )\r\n\r\n\r\ndef prepare_json_results(\r\n    results,\r\n    scanner_directory\r\n):\r\n\r\n    prepared = []\r\n\r\n    for result in results:\r\n\r\n        result_copy = result.copy()\r\n\r\n        result_copy[\"file\"] = make_relative_path(\r\n            result_copy[\"file\"],\r\n            scanner_directory\r\n        )\r\n\r\n        if \"rules\" in result_copy:\r\n\r\n            result_copy[\"rules\"] = []\r\n\r\n            for rule in result[\"rules\"]:\r\n\r\n                rule_copy = rule.copy()\r\n\r\n                rule_copy[\"source\"] = make_relative_path(\r\n                    rule_copy[\"source\"],\r\n                    scanner_directory\r\n                )\r\n\r\n                result_copy[\"rules\"].append(\r\n                    rule_copy\r\n                )\r\n\r\n        prepared.append(\r\n            result_copy\r\n        )\r\n\r\n    return prepared\r\n\r\n\r\ndef build_json_report(\r\n    results,\r\n    target,\r\n    rules_directory,\r\n    scanner_directory,\r\n    files_found,\r\n    files_excluded,\r\n    started_at,\r\n    duration\r\n):\r\n\r\n    summary = create_summary(\r\n        results,\r\n        files_found,\r\n        files_excluded\r\n    )\r\n\r\n    rule_statistics = create_rule_statistics(\r\n        results\r\n    )\r\n\r\n    prepared_results = prepare_json_results(\r\n        results,\r\n        scanner_directory\r\n    )\r\n\r\n    return {\r\n        \"scanner\": {\r\n            \"name\": SCANNER_NAME,\r\n            \"version\": SCANNER_VERSION\r\n        },\r\n\r\n        \"scan\": {\r\n            \"target\": make_relative_path(\r\n                target,\r\n                scanner_directory\r\n            ),\r\n\r\n            \"rules\": make_relative_path(\r\n                rules_directory,\r\n                scanner_directory\r\n            ),\r\n\r\n            \"started_at\": started_at,\r\n\r\n            \"duration_seconds\": round(\r\n                duration,\r\n                4\r\n            )\r\n        },\r\n\r\n        \"summary\": summary,\r\n\r\n        \"rule_statistics\": rule_statistics,\r\n\r\n        \"results\": prepared_results\r\n    }\r\n\r\n\r\ndef output_json(\r\n    report,\r\n    output_file=None\r\n):\r\n\r\n    json_data = json.dumps(\r\n        report,\r\n        indent=4,\r\n        ensure_ascii=False\r\n    )\r\n\r\n    if output_file:\r\n\r\n        try:\r\n\r\n            with open(\r\n                output_file,\r\n                \"w\",\r\n                encoding=\"utf-8\"\r\n            ) as file:\r\n\r\n                file.write(\r\n                    json_data\r\n                )\r\n\r\n        except OSError as error:\r\n\r\n            print(\r\n                Fore.RED\r\n                + f\"[!] Failed to write JSON: \"\r\n                f\"{error}\"\r\n            )\r\n\r\n            return False\r\n\r\n    else:\r\n\r\n        print(json_data)\r\n\r\n    return True\r\n\r\n\r\ndef print_rule_statistics(\r\n    results\r\n):\r\n\r\n    statistics = create_rule_statistics(\r\n        results\r\n    )\r\n\r\n    print()\r\n    print(\"RULE STATISTICS\")\r\n    print(\"-\" * 50)\r\n\r\n    if not statistics:\r\n\r\n        print(\r\n            \"No rules triggered.\"\r\n        )\r\n\r\n        return\r\n\r\n    max_name_length = max(\r\n        len(name)\r\n        for name in statistics\r\n    )\r\n\r\n    for rule_name, count in (\r\n        statistics.items()\r\n    ):\r\n\r\n        print(\r\n            f\"{rule_name:<{max_name_length}}\"\r\n            f\"  {count}\"\r\n        )\r\n\r\n\r\ndef parse_arguments():\r\n\r\n    parser = argparse.ArgumentParser(\r\n        description=\"YARA malware scanning utility\"\r\n    )\r\n\r\n    parser.add_argument(\r\n        \"rules\",\r\n        help=\"Directory containing YARA rules\"\r\n    )\r\n\r\n    parser.add_argument(\r\n        \"target\",\r\n        help=\"File or directory to scan\"\r\n    )\r\n\r\n    parser.add_argument(\r\n        \"-v\",\r\n        \"--verbose\",\r\n        action=\"store_true\",\r\n        help=\"Show detailed information for clean files\"\r\n    )\r\n\r\n    parser.add_argument(\r\n        \"--json\",\r\n        action=\"store_true\",\r\n        help=\"Output scan results as JSON\"\r\n    )\r\n\r\n    parser.add_argument(\r\n        \"--output\",\r\n        metavar=\"FILE\",\r\n        help=\"Write JSON report to FILE\"\r\n    )\r\n\r\n    parser.add_argument(\r\n        \"--exclude\",\r\n        action=\"append\",\r\n        default=[],\r\n        metavar=\"PATTERN\",\r\n        help=(\r\n            \"Exclude files or directories matching \"\r\n            \"PATTERN. Can be used multiple times.\"\r\n        )\r\n    )\r\n\r\n    parser.add_argument(\r\n        \"--hash-all\",\r\n        action=\"store_true\",\r\n        help=\"Calculate SHA-256 for every successfully scanned file\"\r\n    )\r\n\r\n    parser.add_argument(\r\n        \"--quiet\",\r\n        action=\"store_true\",\r\n        help=(\r\n            \"Suppress normal output. \"\r\n            \"Exit code indicates scan result.\"\r\n        )\r\n    )\r\n\r\n    return parser.parse_args()\r\n\r\n\r\ndef main():\r\n\r\n    args = parse_arguments()\r\n\r\n    if args.output and not args.json:\r\n\r\n        print(\r\n            Fore.RED\r\n            + \"[!] --output requires --json\"\r\n        )\r\n\r\n        return 1\r\n\r\n    scanner_directory = os.path.dirname(\r\n        os.path.abspath(__file__)\r\n    )\r\n\r\n    rules_directory = os.path.abspath(\r\n        args.rules\r\n    )\r\n\r\n    target = os.path.abspath(\r\n        args.target\r\n    )\r\n\r\n    started_at = datetime.now(\r\n        timezone.utc\r\n    ).isoformat()\r\n\r\n    start_time = time.perf_counter()\r\n\r\n    if not os.path.isdir(\r\n        rules_directory\r\n    ):\r\n\r\n        if not args.quiet:\r\n\r\n            print(\r\n                Fore.RED\r\n                + \"[!] Rule directory not found: \"\r\n                + rules_directory\r\n            )\r\n\r\n        return 1\r\n\r\n    rule_files = find_rule_files(\r\n        rules_directory\r\n    )\r\n\r\n    if not rule_files:\r\n\r\n        if not args.quiet:\r\n\r\n            print(\r\n                Fore.RED\r\n                + \"[!] No YARA rule files found in: \"\r\n                + rules_directory\r\n            )\r\n\r\n        return 1\r\n\r\n    if not args.quiet and not args.json:\r\n\r\n        print(\"=\" * 50)\r\n        print(\"LOADING YARA RULES\")\r\n        print(\"=\" * 50)\r\n\r\n    rules = compile_rules(\r\n        rule_files,\r\n        quiet=args.quiet or args.json\r\n    )\r\n\r\n    if not args.quiet and not args.json:\r\n\r\n        print()\r\n\r\n        print(\r\n            f\"Rule files found:  \"\r\n            f\"{len(rule_files)}\"\r\n        )\r\n\r\n        print(\r\n            f\"Rule sets loaded:  \"\r\n            f\"{len(rules)}\"\r\n        )\r\n\r\n        print(\"=\" * 50)\r\n        print()\r\n\r\n    if not rules:\r\n\r\n        if not args.quiet:\r\n\r\n            print(\r\n                Fore.RED\r\n                + \"[!] No rule files could be loaded.\"\r\n            )\r\n\r\n        return 1\r\n\r\n    files, excluded_files = collect_files(\r\n        target,\r\n        args.exclude\r\n    )\r\n\r\n    files_found = (\r\n        len(files)\r\n        + len(excluded_files)\r\n    )\r\n\r\n    if not files and not excluded_files:\r\n\r\n        if not args.quiet:\r\n\r\n            print(\r\n                Fore.RED\r\n                + \"[!] Target not found: \"\r\n                + target\r\n            )\r\n\r\n        return 1\r\n\r\n    results = []\r\n\r\n    for file_path in files:\r\n\r\n        results.append(\r\n            scan_file(\r\n                rules,\r\n                file_path,\r\n                hash_all=args.hash_all\r\n            )\r\n        )\r\n\r\n    duration = (\r\n        time.perf_counter()\r\n        - start_time\r\n    )\r\n\r\n    summary = create_summary(\r\n        results,\r\n        files_found,\r\n        len(excluded_files)\r\n    )\r\n\r\n    if args.json:\r\n\r\n        report = build_json_report(\r\n            results,\r\n            target,\r\n            rules_directory,\r\n            scanner_directory,\r\n            files_found,\r\n            len(excluded_files),\r\n            started_at,\r\n            duration\r\n        )\r\n\r\n        success = output_json(\r\n            report,\r\n            args.output\r\n        )\r\n\r\n        if not success:\r\n            return 1\r\n\r\n        if summary[\"files_failed\"] > 0:\r\n            return 1\r\n\r\n        if summary[\"files_matched\"] > 0:\r\n            return 2\r\n\r\n        return 0\r\n\r\n    if args.quiet:\r\n\r\n        if summary[\"files_failed\"] > 0:\r\n\r\n            print(\"ERROR\")\r\n            return 1\r\n\r\n        if summary[\"files_matched\"] > 0:\r\n\r\n            print(\"MATCH\")\r\n            return 2\r\n\r\n        print(\"CLEAN\")\r\n        return 0\r\n\r\n    if args.exclude:\r\n\r\n        print(\r\n            f\"Excluded files:   \"\r\n            f\"{len(excluded_files)}\"\r\n        )\r\n\r\n        print()\r\n\r\n    for result in results:\r\n\r\n        if \"error\" in result:\r\n\r\n            print_error(result)\r\n\r\n        elif result[\"matched\"]:\r\n\r\n            print_match(result)\r\n\r\n        else:\r\n\r\n            print_clean(\r\n                result,\r\n                args.verbose\r\n            )\r\n\r\n    print()\r\n    print(\"=\" * 50)\r\n    print(\"SCAN COMPLETE\")\r\n    print(\"=\" * 50)\r\n\r\n    print(\r\n        f\"Files found:      \"\r\n        f\"{summary['files_found']}\"\r\n    )\r\n\r\n    print(\r\n        f\"Files scanned:    \"\r\n        f\"{summary['files_scanned']}\"\r\n    )\r\n\r\n    print(\r\n        f\"Files excluded:   \"\r\n        f\"{summary['files_excluded']}\"\r\n    )\r\n\r\n    if summary[\"files_matched\"] > 0:\r\n\r\n        print(\r\n            Fore.RED\r\n            + f\"Files matched:    \"\r\n            f\"{summary['files_matched']}\"\r\n        )\r\n\r\n    else:\r\n\r\n        print(\r\n            f\"Files matched:    \"\r\n            f\"{summary['files_matched']}\"\r\n        )\r\n\r\n    if summary[\"rules_triggered\"] > 0:\r\n\r\n        print(\r\n            Fore.RED\r\n            + f\"Rules triggered:  \"\r\n            f\"{summary['rules_triggered']}\"\r\n        )\r\n\r\n    else:\r\n\r\n        print(\r\n            f\"Rules triggered:  \"\r\n            f\"{summary['rules_triggered']}\"\r\n        )\r\n\r\n    if summary[\"files_failed\"] > 0:\r\n\r\n        print(\r\n            Fore.RED\r\n            + f\"Files failed:     \"\r\n            f\"{summary['files_failed']}\"\r\n        )\r\n\r\n    else:\r\n\r\n        print(\r\n            f\"Files failed:     \"\r\n            f\"{summary['files_failed']}\"\r\n        )\r\n\r\n    print(\r\n        f\"Duration:         \"\r\n        f\"{duration:.4f} seconds\"\r\n    )\r\n\r\n    print_rule_statistics(\r\n        results\r\n    )\r\n\r\n    print(\"=\" * 50)\r\n\r\n    if summary[\"files_failed\"] > 0:\r\n        return 1\r\n\r\n    if summary[\"files_matched\"] > 0:\r\n        return 2\r\n\r\n    return 0\r\n\r\n\r\nif __name__ == \"__main__\":\r\n    raise SystemExit(main())
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/yara-scan.py b/yara-scan.py
+--- a/yara-scan.py	(revision 301ea0cfec7b0423b8ff006a601f0095db773913)
++++ b/yara-scan.py	(date 1787831587969)
+@@ -221,10 +221,31 @@
+     return rules
+ 
+ 
++def rule_matches_tags(match, requested_tags):
++
++    if not requested_tags:
++        return True
++
++    rule_tags = {
++        tag.lower()
++        for tag in match.tags
++    }
++
++    requested_tags = {
++        tag.lower()
++        for tag in requested_tags
++    }
++
++    return bool(
++        rule_tags & requested_tags
++    )
++
++
+ def scan_file(
+     rules,
+     file_path,
+-    hash_all=False
++    hash_all=False,
++    requested_tags=None
+ ):
+ 
+     scan_start = time.perf_counter()
+@@ -241,6 +262,12 @@
+ 
+             for match in matches:
+ 
++                if not rule_matches_tags(
++                    match,
++                    requested_tags
++                ):
++                    continue
++
+                 all_matches.append({
+                     "match": match,
+                     "source": rule_set["file"]
+@@ -285,6 +312,7 @@
+             rule_data = {
+                 "name": match.rule,
+                 "source": source,
++                "tags": list(match.tags),
+                 "meta": match.meta,
+                 "strings": []
+             }
+@@ -475,6 +503,14 @@
+             f"{rule['source']}"
+         )
+ 
++        if rule["tags"]:
++
++            print(
++                Fore.RED
++                + f"    Tags: "
++                + ", ".join(rule["tags"])
++            )
++
+         if rule["meta"]:
+ 
+             print(
+@@ -717,7 +753,8 @@
+     files_found,
+     files_excluded,
+     started_at,
+-    duration
++    duration,
++    requested_tags
+ ):
+ 
+     summary = create_summary(
+@@ -752,6 +789,8 @@
+                 scanner_directory
+             ),
+ 
++            "tags": requested_tags,
++
+             "started_at": started_at,
+ 
+             "duration_seconds": round(
+@@ -810,9 +849,7 @@
+     return True
+ 
+ 
+-def print_rule_statistics(
+-    results
+-):
++def print_rule_statistics(results):
+ 
+     statistics = create_rule_statistics(
+         results
+@@ -906,6 +943,17 @@
+         )
+     )
+ 
++    parser.add_argument(
++        "--tag",
++        action="append",
++        default=[],
++        metavar="TAG",
++        help=(
++            "Only report rules containing TAG. "
++            "Can be used multiple times; tags use OR matching."
++        )
++    )
++
+     return parser.parse_args()
+ 
+ 
+@@ -1039,7 +1087,8 @@
+             scan_file(
+                 rules,
+                 file_path,
+-                hash_all=args.hash_all
++                hash_all=args.hash_all,
++                requested_tags=args.tag
+             )
+         )
+ 
+@@ -1064,7 +1113,8 @@
+             files_found,
+             len(excluded_files),
+             started_at,
+-            duration
++            duration,
++            args.tag
+         )
+ 
+         success = output_json(
+@@ -1088,14 +1138,17 @@
+         if summary["files_failed"] > 0:
+ 
+             print("ERROR")
++
+             return 1
+ 
+         if summary["files_matched"] > 0:
+ 
+             print("MATCH")
++
+             return 2
+ 
+         print("CLEAN")
++
+         return 0
+ 
+     if args.exclude:
+@@ -1105,6 +1158,15 @@
+             f"{len(excluded_files)}"
+         )
+ 
++        print()
++
++    if args.tag:
++
++        print(
++            "Tag filter:       "
++            + ", ".join(args.tag)
++        )
++
+         print()
+ 
+     for result in results:
+Index: rules/rules.yar
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>rule SuspiciousStrings\r\n{\r\n    meta:\r\n        description = \"Detects some suspicious strings\"\r\n        author = \"Yaru\"\r\n\r\n    strings:\r\n        $cmd = \"cmd.exe\"\r\n        $powershell = \"powershell\"\r\n        $download = \"DownloadFile\"\r\n\r\n    condition:\r\n        any of them\r\n\r\n}rule SuspiciousStrings1\r\n{\r\n    meta:\r\n        description = \"Detects suspicious command and PowerShell strings\"\r\n        author = \"Yaru\"\r\n        severity = \"medium\"\r\n        category = \"execution\"\r\n\r\n    strings:\r\n        $cmd = \"cmd.exe\"\r\n        $powershell = \"powershell\"\r\n        $download = \"DownloadFile\"\r\n\r\n    condition:\r\n        any of them\r\n}
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/rules/rules.yar b/rules/rules.yar
+--- a/rules/rules.yar	(revision 301ea0cfec7b0423b8ff006a601f0095db773913)
++++ b/rules/rules.yar	(date 1787831657703)
+@@ -1,30 +1,12 @@
+-rule SuspiciousStrings
++rule SuspiciousPowerShell : powershell execution
+ {
+     meta:
+-        description = "Detects some suspicious strings"
++        description = "Detects suspicious PowerShell usage"
+         author = "Yaru"
+ 
+     strings:
+-        $cmd = "cmd.exe"
+         $powershell = "powershell"
+-        $download = "DownloadFile"
+ 
+     condition:
+-        any of them
+-
+-}rule SuspiciousStrings1
+-{
+-    meta:
+-        description = "Detects suspicious command and PowerShell strings"
+-        author = "Yaru"
+-        severity = "medium"
+-        category = "execution"
+-
+-    strings:
+-        $cmd = "cmd.exe"
+-        $powershell = "powershell"
+-        $download = "DownloadFile"
+-
+-    condition:
+-        any of them
++        $powershell
+ }
+\ No newline at end of file
+Index: .idea/workspace.xml
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+><?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<project version=\"4\">\r\n  <component name=\"AutoImportSettings\">\r\n    <option name=\"autoReloadType\" value=\"ALL\" />\r\n  </component>\r\n  <component name=\"ChangeListManager\">\r\n    <list default=\"true\" id=\"54c53824-2246-4390-a5af-01de8d5eb63d\" name=\"Changes\" comment=\"\">\r\n      <change beforePath=\"$PROJECT_DIR$/.idea/Yara Scanner.iml\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/.idea/Yara Scanner.iml\" afterDir=\"false\" />\r\n      <change beforePath=\"$PROJECT_DIR$/.idea/workspace.xml\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/.idea/workspace.xml\" afterDir=\"false\" />\r\n      <change beforePath=\"$PROJECT_DIR$/rules.yar\" beforeDir=\"false\" />\r\n      <change beforePath=\"$PROJECT_DIR$/yara-scan.py\" beforeDir=\"false\" afterPath=\"$PROJECT_DIR$/yara-scan.py\" afterDir=\"false\" />\r\n    </list>\r\n    <option name=\"SHOW_DIALOG\" value=\"false\" />\r\n    <option name=\"HIGHLIGHT_CONFLICTS\" value=\"true\" />\r\n    <option name=\"HIGHLIGHT_NON_ACTIVE_CHANGELIST\" value=\"false\" />\r\n    <option name=\"LAST_RESOLUTION\" value=\"IGNORE\" />\r\n  </component>\r\n  <component name=\"EmbeddingIndexingInfo\">\r\n    <option name=\"cachedIndexableFilesCount\" value=\"10\" />\r\n    <option name=\"fileBasedEmbeddingIndicesEnabled\" value=\"true\" />\r\n  </component>\r\n  <component name=\"FileTemplateManagerImpl\">\r\n    <option name=\"RECENT_TEMPLATES\">\r\n      <list>\r\n        <option value=\"Python Script\" />\r\n      </list>\r\n    </option>\r\n  </component>\r\n  <component name=\"Git.Settings\">\r\n    <option name=\"RECENT_GIT_ROOT_PATH\" value=\"$PROJECT_DIR$\" />\r\n  </component>\r\n  <component name=\"GitHubPullRequestSearchHistory\">{\r\n  &quot;lastFilter&quot;: {\r\n    &quot;state&quot;: &quot;OPEN&quot;,\r\n    &quot;assignee&quot;: &quot;Yaruzoku&quot;\r\n  }\r\n}</component>\r\n  <component name=\"GithubPullRequestsUISettings\">{\r\n  &quot;selectedUrlAndAccountId&quot;: {\r\n    &quot;url&quot;: &quot;https://github.com/Yaruzoku/Yara-Scanner.git&quot;,\r\n    &quot;accountId&quot;: &quot;cd65658b-1399-4f8c-ab3e-363c42d159de&quot;\r\n  }\r\n}</component>\r\n  <component name=\"McpProjectServerCommands\">\r\n    <commands />\r\n    <urls />\r\n  </component>\r\n  <component name=\"NextEditCompletionFeaturesState\">\r\n    <decayedCancelled>\r\n      <entry key=\"MS100\" value=\"1.0\" />\r\n      <entry key=\"MS500\" value=\"1.0\" />\r\n      <entry key=\"S2\" value=\"1.0\" />\r\n      <entry key=\"S5\" value=\"1.0\" />\r\n      <entry key=\"S10\" value=\"1.0\" />\r\n      <entry key=\"S30\" value=\"1.0000000000000515\" />\r\n      <entry key=\"S60\" value=\"1.0000005586456644\" />\r\n      <entry key=\"M2\" value=\"1.001920741558176\" />\r\n      <entry key=\"M5\" value=\"1.295085582845329\" />\r\n      <entry key=\"M10\" value=\"2.985990109182635\" />\r\n      <entry key=\"M15\" value=\"5.189254084266305\" />\r\n      <entry key=\"M30\" value=\"10.702557054440891\" />\r\n      <entry key=\"H1\" value=\"16.366272790176083\" />\r\n      <entry key=\"H2\" value=\"20.535135117838767\" />\r\n      <entry key=\"H4\" value=\"23.08124121547804\" />\r\n      <entry key=\"D1\" value=\"25.48528325883466\" />\r\n      <entry key=\"W1\" value=\"25.92574364057673\" />\r\n    </decayedCancelled>\r\n    <decayedSelected>\r\n      <entry key=\"MS100\" value=\"0.0\" />\r\n      <entry key=\"MS500\" value=\"0.0\" />\r\n      <entry key=\"S2\" value=\"0.0\" />\r\n      <entry key=\"S5\" value=\"7.938744675358124E-157\" />\r\n      <entry key=\"S10\" value=\"8.909963341876402E-79\" />\r\n      <entry key=\"S30\" value=\"9.622589793315123E-27\" />\r\n      <entry key=\"S60\" value=\"9.809480003198499E-14\" />\r\n      <entry key=\"M2\" value=\"3.1320089404723123E-7\" />\r\n      <entry key=\"M5\" value=\"0.002502241353626143\" />\r\n      <entry key=\"M10\" value=\"0.05002240851484604\" />\r\n      <entry key=\"M15\" value=\"0.13576142851305098\" />\r\n      <entry key=\"M30\" value=\"0.36845817742730436\" />\r\n      <entry key=\"H1\" value=\"0.607007559612979\" />\r\n      <entry key=\"H2\" value=\"0.7791068987070894\" />\r\n      <entry key=\"H4\" value=\"0.8826703227746413\" />\r\n      <entry key=\"D1\" value=\"0.9794142552377492\" />\r\n      <entry key=\"W1\" value=\"0.9970328984655284\" />\r\n    </decayedSelected>\r\n    <decayedShown>\r\n      <entry key=\"MS100\" value=\"0.9075191553171609\" />\r\n      <entry key=\"MS500\" value=\"0.9807790039885513\" />\r\n      <entry key=\"S2\" value=\"0.9951597218200828\" />\r\n      <entry key=\"S5\" value=\"0.9980610700524115\" />\r\n      <entry key=\"S10\" value=\"0.9990300646389034\" />\r\n      <entry key=\"S30\" value=\"0.9996765836261438\" />\r\n      <entry key=\"S60\" value=\"0.9998388323091513\" />\r\n      <entry key=\"M2\" value=\"1.0018318347694775\" />\r\n      <entry key=\"M5\" value=\"1.2970654693651913\" />\r\n      <entry key=\"M10\" value=\"3.0341103779830862\" />\r\n      <entry key=\"M15\" value=\"5.3221412438457465\" />\r\n      <entry key=\"M30\" value=\"11.067457567819794\" />\r\n      <entry key=\"H1\" value=\"16.97039450831228\" />\r\n      <entry key=\"H2\" value=\"21.31239145526955\" />\r\n      <entry key=\"H4\" value=\"23.962861989078586\" />\r\n      <entry key=\"D1\" value=\"26.46450306720807\" />\r\n      <entry key=\"W1\" value=\"26.922748250507468\" />\r\n    </decayedShown>\r\n  </component>\r\n  <component name=\"ProjectColorInfo\">{\r\n  &quot;associatedIndex&quot;: 7,\r\n  &quot;fromUser&quot;: false\r\n}</component>\r\n  <component name=\"ProjectId\" id=\"3ISwvvEP1hD4iaDqhvcGHhIJuVK\" />\r\n  <component name=\"ProjectLevelVcsManager\">\r\n    <ConfirmationsSetting value=\"1\" id=\"Add\" />\r\n  </component>\r\n  <component name=\"ProjectViewState\">\r\n    <option name=\"hideEmptyMiddlePackages\" value=\"true\" />\r\n    <option name=\"showLibraryContents\" value=\"true\" />\r\n  </component>\r\n  <component name=\"PropertiesComponent\">{\r\n  &quot;keyToString&quot;: {\r\n    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,\r\n    &quot;RunOnceActivity.MCP Project settings loaded&quot;: &quot;true&quot;,\r\n    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,\r\n    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,\r\n    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,\r\n    &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,\r\n    &quot;com.intellij.ml.llm.matterhorn.ej.ui.settings.DefaultModelSelectionForGA.v1&quot;: &quot;true&quot;,\r\n    &quot;git-widget-placeholder&quot;: &quot;master&quot;,\r\n    &quot;junie.onboarding.icon.badge.shown&quot;: &quot;true&quot;,\r\n    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,\r\n    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,\r\n    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,\r\n    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,\r\n    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,\r\n    &quot;settings.editor.selected.configurable&quot;: &quot;preferences.pluginManager&quot;,\r\n    &quot;to.speed.mode.migration.done&quot;: &quot;true&quot;\r\n  }\r\n}</component>\r\n  <component name=\"SharedIndexes\">\r\n    <attachedChunks>\r\n      <set>\r\n        <option value=\"bundled-python-sdk-6fa658e1df1a-5bd6d13a2a75-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-262.8665.369\" />\r\n      </set>\r\n    </attachedChunks>\r\n  </component>\r\n  <component name=\"TaskManager\">\r\n    <task active=\"true\" id=\"Default\" summary=\"Default task\">\r\n      <changelist id=\"54c53824-2246-4390-a5af-01de8d5eb63d\" name=\"Changes\" comment=\"\" />\r\n      <created>1787771513788</created>\r\n      <option name=\"number\" value=\"Default\" />\r\n      <option name=\"presentableId\" value=\"Default\" />\r\n      <updated>1787771513788</updated>\r\n      <workItem from=\"1787771514814\" duration=\"145000\" />\r\n      <workItem from=\"1787771674969\" duration=\"21000\" />\r\n      <workItem from=\"1787771711336\" duration=\"267000\" />\r\n      <workItem from=\"1787772159533\" duration=\"3540000\" />\r\n      <workItem from=\"1787827068867\" duration=\"3327000\" />\r\n    </task>\r\n    <servers />\r\n  </component>\r\n  <component name=\"TypeScriptGeneratedFilesManager\">\r\n    <option name=\"version\" value=\"3\" />\r\n  </component>\r\n</project>
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/.idea/workspace.xml b/.idea/workspace.xml
+--- a/.idea/workspace.xml	(revision 301ea0cfec7b0423b8ff006a601f0095db773913)
++++ b/.idea/workspace.xml	(date 1787831588282)
+@@ -4,10 +4,8 @@
+     <option name="autoReloadType" value="ALL" />
+   </component>
+   <component name="ChangeListManager">
+-    <list default="true" id="54c53824-2246-4390-a5af-01de8d5eb63d" name="Changes" comment="">
+-      <change beforePath="$PROJECT_DIR$/.idea/Yara Scanner.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/Yara Scanner.iml" afterDir="false" />
++    <list default="true" id="54c53824-2246-4390-a5af-01de8d5eb63d" name="Changes" comment="Initial commit">
+       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+-      <change beforePath="$PROJECT_DIR$/rules.yar" beforeDir="false" />
+       <change beforePath="$PROJECT_DIR$/yara-scan.py" beforeDir="false" afterPath="$PROJECT_DIR$/yara-scan.py" afterDir="false" />
+     </list>
+     <option name="SHOW_DIALOG" value="false" />
+@@ -154,11 +152,40 @@
+       <workItem from="1787771674969" duration="21000" />
+       <workItem from="1787771711336" duration="267000" />
+       <workItem from="1787772159533" duration="3540000" />
+-      <workItem from="1787827068867" duration="3327000" />
++      <workItem from="1787827068867" duration="4199000" />
++    </task>
++    <task id="LOCAL-00001" summary="Initial commit">
++      <option name="closed" value="true" />
++      <created>1787830832515</created>
++      <option name="number" value="00001" />
++      <option name="presentableId" value="LOCAL-00001" />
++      <option name="project" value="LOCAL" />
++      <updated>1787830832515</updated>
++    </task>
++    <task id="LOCAL-00002" summary="Initial commit">
++      <option name="closed" value="true" />
++      <created>1787830878752</created>
++      <option name="number" value="00002" />
++      <option name="presentableId" value="LOCAL-00002" />
++      <option name="project" value="LOCAL" />
++      <updated>1787830878752</updated>
++    </task>
++    <task id="LOCAL-00003" summary="Initial commit">
++      <option name="closed" value="true" />
++      <created>1787830934930</created>
++      <option name="number" value="00003" />
++      <option name="presentableId" value="LOCAL-00003" />
++      <option name="project" value="LOCAL" />
++      <updated>1787830934930</updated>
+     </task>
++    <option name="localTasksCounter" value="4" />
+     <servers />
+   </component>
+   <component name="TypeScriptGeneratedFilesManager">
+     <option name="version" value="3" />
+   </component>
++  <component name="VcsManagerConfiguration">
++    <MESSAGE value="Initial commit" />
++    <option name="LAST_COMMIT_MESSAGE" value="Initial commit" />
++  </component>
+ </project>
+\ No newline at end of file

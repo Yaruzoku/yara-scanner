@@ -1,0 +1,55 @@
+# Python
+
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+
+.venv/
+venv/
+env/
+ENV/
+
+# Testing / tooling
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Build / packaging
+
+build/
+dist/
+*.spec
+icon.ico
+
+# IDEs / editors
+
+.vscode/
+.idea/
+
+# OS files
+
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local configuration
+
+.env
+.env.*
+
+# Logs / temporary files
+
+*.log
+*.tmp
+*.temp
+
+# Local scan output
+
+reports/
+scan_results/
+*.json
