@@ -89,10 +89,10 @@ Install the Python dependencies:
 pip install -r requirements.txt
 ```
 
-Then launch the GUI from the project root:
+Then launch the GUI as a module from the project root:
 
 ```powershell
-python gui\app.py
+python -m gui.app
 ```
 
 The command-line scanner can be launched with:
