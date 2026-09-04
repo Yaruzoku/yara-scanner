@@ -3,7 +3,7 @@
 
 a = Analysis(
     ['gui/app.py'],
-    pathex=['.'],
+    pathex=[],
     binaries=[],
     datas=[],
     hiddenimports=[],
@@ -22,7 +22,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='YaraScanner',
+    name='YARAScanner',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

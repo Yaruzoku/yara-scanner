@@ -9,19 +9,23 @@ from yara_scanner.rules import (
     find_rule_files,
     compile_rules
 )
-
 from yara_scanner.scanner import scan_target
 
 
 class YaraScannerApp(tk.Tk):
-
     def __init__(self):
         super().__init__()
 
         self.title("YARA Scanner")
-        self.geometry("1100x850")
-        self.minsize(850, 600)
+        self.geometry("1100x650")
+        self.minsize(850, 680)
         self.resizable(True, True)
+
+        # ==================================================
+        # Theme
+        # ==================================================
+
+        self.dark_mode = tk.BooleanVar(value=False)
 
         self.rules_path = tk.StringVar()
         self.target_path = tk.StringVar()
@@ -31,23 +35,49 @@ class YaraScannerApp(tk.Tk):
         self.current_results = []
         self.last_scan = None
 
-        # Every entry contains:
-        #
-        # {
-        #     "name": ...,
-        #     "source": ...,
-        #     "tags": [...],
-        #     "meta": {...},
-        #     "enabled": True
-        # }
-        #
         self.rule_entries = []
 
         self.scan_queue = queue.Queue()
 
+        self.presets = {}
+        self.preset_name = tk.StringVar()
+        self.pending_preset_load = None
+
+        if os.name == "nt":
+            app_data = os.environ.get(
+                "APPDATA",
+                os.path.expanduser("~")
+            )
+
+            config_dir = os.path.join(
+                app_data,
+                "YARA Scanner"
+            )
+
+        else:
+            config_dir = os.path.join(
+                os.path.expanduser("~"),
+                ".config",
+                "YARA Scanner"
+            )
+
+        os.makedirs(
+            config_dir,
+            exist_ok=True
+        )
+
+        self.preset_file = os.path.join(
+            config_dir,
+            "presets.json"
+        )
+
+        self.load_presets()
+
         self.create_styles()
         self.create_scrollable_window()
         self.create_widgets()
+
+        self.apply_theme()
 
         self.after(
             100,
@@ -55,35 +85,375 @@ class YaraScannerApp(tk.Tk):
         )
 
     # ======================================================
-    # Styles
+    # Styles / Theme
     # ======================================================
 
     def create_styles(self):
-
-        style = ttk.Style(self)
+        self.style = ttk.Style(self)
 
         try:
-            style.configure(
-                "Green.Horizontal.TProgressbar",
-                background="green"
-            )
+            self.style.theme_use("clam")
         except tk.TclError:
             pass
 
         try:
-            style.configure(
+            self.style.configure(
                 "TPanedwindow",
                 sashwidth=8
             )
         except tk.TclError:
             pass
 
+    def toggle_theme(self):
+        self.dark_mode.set(
+            not self.dark_mode.get()
+        )
+
+        self.apply_theme()
+
+    def apply_theme(self):
+        dark = self.dark_mode.get()
+
+        if dark:
+            self.colors = {
+                "bg": "#1e1e1e",
+                "surface": "#252526",
+                "surface2": "#2d2d30",
+                "fg": "#f1f1f1",
+                "muted": "#bdbdbd",
+                "border": "#444444",
+                "entry": "#1e1e1e",
+                "select": "#094771",
+                "select_fg": "#ffffff",
+                "button": "#333337",
+                "button_active": "#45454a",
+                "disabled": "#777777",
+                "text": "#f1f1f1"
+            }
+
+        else:
+            self.colors = {
+                "bg": "#f0f0f0",
+                "surface": "#ffffff",
+                "surface2": "#f5f5f5",
+                "fg": "#202020",
+                "muted": "#606060",
+                "border": "#c8c8c8",
+                "entry": "#ffffff",
+                "select": "#cce8ff",
+                "select_fg": "#000000",
+                "button": "#f5f5f5",
+                "button_active": "#e5e5e5",
+                "disabled": "#a0a0a0",
+                "text": "#202020"
+            }
+
+        c = self.colors
+
+        # --------------------------------------------------
+        # Root / canvas
+        # --------------------------------------------------
+
+        self.configure(
+            bg=c["bg"]
+        )
+
+        if hasattr(self, "main_canvas"):
+            self.main_canvas.configure(
+                bg=c["bg"],
+                highlightbackground=c["bg"]
+            )
+
+        # --------------------------------------------------
+        # General ttk
+        # --------------------------------------------------
+
+        self.style.configure(
+            ".",
+            background=c["bg"],
+            foreground=c["fg"]
+        )
+
+        self.style.configure(
+            "TFrame",
+            background=c["bg"]
+        )
+
+        self.style.configure(
+            "TLabel",
+            background=c["bg"],
+            foreground=c["fg"]
+        )
+
+        self.style.configure(
+            "TLabelframe",
+            background=c["bg"],
+            foreground=c["fg"],
+            bordercolor=c["border"]
+        )
+
+        self.style.configure(
+            "TLabelframe.Label",
+            background=c["bg"],
+            foreground=c["fg"]
+        )
+
+        # --------------------------------------------------
+        # Buttons
+        # --------------------------------------------------
+
+        self.style.configure(
+            "TButton",
+            background=c["button"],
+            foreground=c["fg"],
+            bordercolor=c["border"],
+            lightcolor=c["button"],
+            darkcolor=c["button"],
+            focusthickness=1,
+            padding=(8, 5)
+        )
+
+        self.style.map(
+            "TButton",
+            background=[
+                ("active", c["button_active"]),
+                ("pressed", c["button_active"]),
+                ("disabled", c["surface2"])
+            ],
+            foreground=[
+                ("disabled", c["disabled"])
+            ]
+        )
+
+        # --------------------------------------------------
+        # Entries
+        # --------------------------------------------------
+
+        self.style.configure(
+            "TEntry",
+            fieldbackground=c["entry"],
+            foreground=c["fg"],
+            bordercolor=c["border"],
+            lightcolor=c["border"],
+            darkcolor=c["border"]
+        )
+
+        self.style.map(
+            "TEntry",
+            fieldbackground=[
+                ("disabled", c["surface2"])
+            ],
+            foreground=[
+                ("disabled", c["disabled"])
+            ]
+        )
+
+        # --------------------------------------------------
+        # Combobox
+        # --------------------------------------------------
+
+        self.style.configure(
+            "TCombobox",
+            fieldbackground=c["entry"],
+            background=c["button"],
+            foreground=c["fg"],
+            arrowcolor=c["fg"],
+            bordercolor=c["border"],
+            lightcolor=c["border"],
+            darkcolor=c["border"]
+        )
+
+        self.style.map(
+            "TCombobox",
+            fieldbackground=[
+                ("readonly", c["entry"]),
+                ("disabled", c["surface2"])
+            ],
+            foreground=[
+                ("disabled", c["disabled"])
+            ],
+            selectbackground=[
+                ("readonly", c["select"])
+            ],
+            selectforeground=[
+                ("readonly", c["select_fg"])
+            ]
+        )
+
+        self.option_add(
+            "*TCombobox*Listbox.background",
+            c["entry"]
+        )
+
+        self.option_add(
+            "*TCombobox*Listbox.foreground",
+            c["fg"]
+        )
+
+        self.option_add(
+            "*TCombobox*Listbox.selectBackground",
+            c["select"]
+        )
+
+        self.option_add(
+            "*TCombobox*Listbox.selectForeground",
+            c["select_fg"]
+        )
+
+        # --------------------------------------------------
+        # Checkbuttons
+        # --------------------------------------------------
+
+        self.style.configure(
+            "TCheckbutton",
+            background=c["bg"],
+            foreground=c["fg"]
+        )
+
+        self.style.map(
+            "TCheckbutton",
+            background=[
+                ("active", c["bg"])
+            ],
+            foreground=[
+                ("disabled", c["disabled"])
+            ]
+        )
+
+        # --------------------------------------------------
+        # Treeviews
+        # --------------------------------------------------
+
+        self.style.configure(
+            "Treeview",
+            background=c["surface"],
+            foreground=c["fg"],
+            fieldbackground=c["surface"],
+            bordercolor=c["border"],
+            lightcolor=c["border"],
+            darkcolor=c["border"],
+            rowheight=25
+        )
+
+        self.style.map(
+            "Treeview",
+            background=[
+                ("selected", c["select"])
+            ],
+            foreground=[
+                ("selected", c["select_fg"])
+            ]
+        )
+
+        self.style.configure(
+            "Treeview.Heading",
+            background=c["surface2"],
+            foreground=c["fg"],
+            bordercolor=c["border"],
+            lightcolor=c["border"],
+            darkcolor=c["border"],
+            relief="flat"
+        )
+
+        self.style.map(
+            "Treeview.Heading",
+            background=[
+                ("active", c["button_active"])
+            ],
+            foreground=[
+                ("active", c["fg"])
+            ]
+        )
+
+        # --------------------------------------------------
+        # Scrollbars
+        # --------------------------------------------------
+
+        self.style.configure(
+            "TScrollbar",
+            background=c["button"],
+            troughcolor=c["surface2"],
+            bordercolor=c["border"],
+            lightcolor=c["button"],
+            darkcolor=c["button"],
+            arrowcolor=c["fg"]
+        )
+
+        self.style.map(
+            "TScrollbar",
+            background=[
+                ("active", c["button_active"]),
+                ("pressed", c["button_active"])
+            ]
+        )
+
+        # --------------------------------------------------
+        # Paned windows
+        # --------------------------------------------------
+
+        self.style.configure(
+            "TPanedwindow",
+            background=c["border"]
+        )
+
+        # --------------------------------------------------
+        # Progress bars
+        # --------------------------------------------------
+
+        self.style.configure(
+            "Horizontal.TProgressbar",
+            background=c["select"],
+            troughcolor=c["surface2"],
+            bordercolor=c["border"],
+            lightcolor=c["select"],
+            darkcolor=c["select"]
+        )
+
+        self.style.configure(
+            "Green.Horizontal.TProgressbar",
+            background="#4caf50",
+            troughcolor=c["surface2"],
+            bordercolor=c["border"],
+            lightcolor="#4caf50",
+            darkcolor="#4caf50"
+        )
+
+        # --------------------------------------------------
+        # Text widgets
+        # --------------------------------------------------
+
+        for widget in (
+            getattr(self, "details", None),
+            getattr(self, "rule_details", None)
+        ):
+
+            if widget is None:
+                continue
+
+            widget.configure(
+                background=c["surface"],
+                foreground=c["text"],
+                insertbackground=c["fg"],
+                selectbackground=c["select"],
+                selectforeground=c["select_fg"]
+            )
+
+        # --------------------------------------------------
+        # Theme button
+        # --------------------------------------------------
+
+        if hasattr(self, "theme_button"):
+            self.theme_button.configure(
+                text="☀ Light"
+                if dark
+                else "🌙 Dark"
+            )
+
     # ======================================================
     # Scrollable main window
     # ======================================================
 
     def create_scrollable_window(self):
-
         outer = ttk.Frame(self)
 
         outer.pack(
@@ -145,25 +515,21 @@ class YaraScannerApp(tk.Tk):
         )
 
     def update_scroll_region(self, event=None):
-
         self.main_canvas.configure(
             scrollregion=self.main_canvas.bbox("all")
         )
 
     def resize_scrollable_frame(self, event):
-
         self.main_canvas.itemconfigure(
             self.canvas_window,
             width=event.width
         )
 
     def on_mousewheel(self, event):
-
         widget = event.widget
         current = widget
 
         while current is not None:
-
             if current in (
                 getattr(self, "results", None),
                 getattr(self, "rule_tree", None),
@@ -187,20 +553,35 @@ class YaraScannerApp(tk.Tk):
     # ======================================================
 
     def create_widgets(self):
-
         main = self.main_frame
 
         # --------------------------------------------------
         # Title
         # --------------------------------------------------
 
+        title_frame = ttk.Frame(main)
+
+        title_frame.pack(
+            fill="x",
+            pady=(0, 12)
+        )
+
         ttk.Label(
-            main,
+            title_frame,
             text="YARA Scanner",
             font=("Segoe UI", 20, "bold")
         ).pack(
-            anchor="w",
-            pady=(0, 12)
+            side="left"
+        )
+
+        self.theme_button = ttk.Button(
+            title_frame,
+            text="🌙 Dark",
+            command=self.toggle_theme
+        )
+
+        self.theme_button.pack(
+            side="right"
         )
 
         # --------------------------------------------------
@@ -388,6 +769,75 @@ class YaraScannerApp(tk.Tk):
             side="left",
             padx=(12, 0)
         )
+
+        # --------------------------------------------------
+        # Presets
+        # --------------------------------------------------
+
+        preset_frame = ttk.Frame(
+            rule_manager
+        )
+
+        preset_frame.pack(
+            fill="x",
+            pady=(0, 8)
+        )
+
+        ttk.Label(
+            preset_frame,
+            text="Presets:"
+        ).pack(
+            side="left"
+        )
+
+        self.preset_combo = ttk.Combobox(
+            preset_frame,
+            textvariable=self.preset_name,
+            state="readonly",
+            width=25
+        )
+
+        self.preset_combo.pack(
+            side="left",
+            padx=(6, 4)
+        )
+
+        ttk.Button(
+            preset_frame,
+            text="Load",
+            command=self.load_preset
+        ).pack(
+            side="left",
+            padx=(0, 4)
+        )
+
+        ttk.Button(
+            preset_frame,
+            text="Save",
+            command=self.save_preset
+        ).pack(
+            side="left",
+            padx=(0, 4)
+        )
+
+        ttk.Button(
+            preset_frame,
+            text="Delete",
+            command=self.delete_preset
+        ).pack(
+            side="left",
+            padx=(0, 4)
+        )
+
+        ttk.Button(
+            preset_frame,
+            text="Reset",
+            command=self.reset_rules
+        ).pack(
+            side="left"
+        )
+
+        self.update_preset_dropdown()
 
         # --------------------------------------------------
         # Rule list / details splitter
@@ -603,14 +1053,10 @@ class YaraScannerApp(tk.Tk):
         )
 
         rule_manager.configure(
-            height=210
+            height=260
         )
 
         rule_manager.pack_propagate(False)
-
-        # --------------------------------------------------
-        # Fit rule columns after layout
-        # --------------------------------------------------
 
         self.after(
             200,
@@ -905,12 +1351,13 @@ class YaraScannerApp(tk.Tk):
             state="disabled"
         )
 
+        # Smaller default results section.
         results_frame.configure(
-            height=260
+            height=50
         )
 
         details_frame.configure(
-            height=240
+            height=110
         )
 
         results_frame.pack_propagate(False)
@@ -945,7 +1392,6 @@ class YaraScannerApp(tk.Tk):
     # ======================================================
 
     def set_initial_splitters(self):
-
         try:
             width = self.rule_paned.winfo_width()
 
@@ -961,10 +1407,10 @@ class YaraScannerApp(tk.Tk):
         try:
             height = self.paned.winfo_height()
 
-            if height > 200:
+            if height > 150:
                 self.paned.sashpos(
                     0,
-                    int(height * 0.62)
+                    int(height * 0.20)
                 )
 
         except tk.TclError:
@@ -976,7 +1422,6 @@ class YaraScannerApp(tk.Tk):
         )
 
     def fit_rule_columns(self):
-
         if not hasattr(
             self,
             "rule_tree"
@@ -1027,14 +1472,12 @@ class YaraScannerApp(tk.Tk):
     # ======================================================
 
     def refresh_rules(self):
-
         rules_path = self.rules_path.get().strip()
 
         if not rules_path:
             return
 
         if not os.path.isdir(rules_path):
-
             messagebox.showerror(
                 "Invalid rules directory",
                 "The selected rules directory does not exist."
@@ -1060,9 +1503,7 @@ class YaraScannerApp(tk.Tk):
         self,
         rules_path
     ):
-
         try:
-
             rule_files = find_rule_files(
                 rules_path
             )
@@ -1080,7 +1521,6 @@ class YaraScannerApp(tk.Tk):
             )
 
         except Exception as error:
-
             self.scan_queue.put(
                 (
                     "rules_error",
@@ -1089,6 +1529,13 @@ class YaraScannerApp(tk.Tk):
             )
 
     def populate_rule_manager(self):
+        previous_states = {
+            (
+                rule["source"],
+                rule["name"]
+            ): rule["enabled"]
+            for rule in self.rule_entries
+        }
 
         for item in self.rule_tree.get_children():
             self.rule_tree.delete(item)
@@ -1101,12 +1548,20 @@ class YaraScannerApp(tk.Tk):
 
             for rule in rule_set["compiled"]:
 
+                key = (
+                    source,
+                    rule.identifier
+                )
+
                 entry = {
                     "name": rule.identifier,
                     "source": source,
                     "tags": list(rule.tags),
                     "meta": dict(rule.meta),
-                    "enabled": True
+                    "enabled": previous_states.get(
+                        key,
+                        True
+                    )
                 }
 
                 self.rule_entries.append(
@@ -1118,7 +1573,6 @@ class YaraScannerApp(tk.Tk):
         self.filter_rules()
 
     def update_rule_count(self):
-
         total = len(
             self.rule_entries
         )
@@ -1147,7 +1601,6 @@ class YaraScannerApp(tk.Tk):
         self,
         *args
     ):
-
         search = self.rule_search.get().strip().lower()
 
         for item in self.rule_tree.get_children():
@@ -1194,11 +1647,6 @@ class YaraScannerApp(tk.Tk):
         self,
         event
     ):
-        """
-        Toggle the enabled state when the first
-        column of a rule is clicked.
-        """
-
         region = self.rule_tree.identify(
             "region",
             event.x,
@@ -1230,9 +1678,7 @@ class YaraScannerApp(tk.Tk):
 
         self.filter_rules()
 
-        # Keep the clicked rule selected if possible.
         if str(index) in self.rule_tree.get_children():
-
             self.rule_tree.selection_set(
                 str(index)
             )
@@ -1244,26 +1690,18 @@ class YaraScannerApp(tk.Tk):
         return "break"
 
     def enable_all_rules(self):
-
         for rule in self.rule_entries:
             rule["enabled"] = True
 
         self.filter_rules()
 
     def disable_all_rules(self):
-
         for rule in self.rule_entries:
             rule["enabled"] = False
 
         self.filter_rules()
 
     def get_enabled_rules(self):
-
-        """
-        Return a set containing the identifiers
-        of all enabled YARA rules.
-        """
-
         return {
             rule["name"]
             for rule in self.rule_entries
@@ -1274,7 +1712,6 @@ class YaraScannerApp(tk.Tk):
         self,
         event=None
     ):
-
         selected = self.rule_tree.selection()
 
         if not selected:
@@ -1341,7 +1778,6 @@ class YaraScannerApp(tk.Tk):
         self,
         text
     ):
-
         self.rule_details.config(
             state="normal"
         )
@@ -1361,44 +1797,398 @@ class YaraScannerApp(tk.Tk):
         )
 
     # ======================================================
+    # Presets
+    # ======================================================
+
+    def load_presets(self):
+        self.presets = {}
+
+        if not os.path.isfile(
+            self.preset_file
+        ):
+            return
+
+        try:
+            with open(
+                self.preset_file,
+                "r",
+                encoding="utf-8"
+            ) as file:
+
+                data = json.load(file)
+
+            if isinstance(data, dict):
+                self.presets = data
+
+        except Exception:
+            self.presets = {}
+
+    def save_presets(self):
+        try:
+            os.makedirs(
+                os.path.dirname(
+                    self.preset_file
+                ),
+                exist_ok=True
+            )
+
+            with open(
+                self.preset_file,
+                "w",
+                encoding="utf-8"
+            ) as file:
+
+                json.dump(
+                    self.presets,
+                    file,
+                    indent=4,
+                    ensure_ascii=False
+                )
+
+            return True
+
+        except Exception as error:
+
+            messagebox.showerror(
+                "Preset error",
+                f"Could not save presets:\n\n{error}"
+            )
+
+            return False
+
+    def update_preset_dropdown(self):
+        if not hasattr(
+            self,
+            "preset_combo"
+        ):
+            return
+
+        names = sorted(
+            self.presets.keys(),
+            key=str.lower
+        )
+
+        self.preset_combo["values"] = [
+            ""
+        ] + names
+
+        current = self.preset_name.get()
+
+        if current not in names:
+            self.preset_name.set("")
+
+    def get_preset_data(
+        self,
+        name
+    ):
+        data = self.presets.get(
+            name
+        )
+
+        if not isinstance(
+            data,
+            dict
+        ):
+            return {
+                "rules_path": "",
+                "rules": {}
+            }
+
+        if "rules" in data:
+            return {
+                "rules_path": data.get(
+                    "rules_path",
+                    ""
+                ),
+                "rules": data.get(
+                    "rules",
+                    {}
+                )
+            }
+
+        return {
+            "rules_path": "",
+            "rules": data
+        }
+
+    def save_preset(self):
+        name = self.preset_name.get().strip()
+
+        if not name:
+            from tkinter.simpledialog import askstring
+
+            name = askstring(
+                "Save preset",
+                "Enter a name for this preset:"
+            )
+
+            if not name:
+                return
+
+            name = name.strip()
+
+        if not name:
+            return
+
+        states = {}
+
+        for rule in self.rule_entries:
+
+            key = (
+                f"{rule['source']}::"
+                f"{rule['name']}"
+            )
+
+            states[key] = bool(
+                rule["enabled"]
+            )
+
+        self.presets[name] = {
+            "rules_path": self.rules_path.get().strip(),
+            "rules": states
+        }
+
+        if not self.save_presets():
+            return
+
+        self.preset_name.set(
+            name
+        )
+
+        self.update_preset_dropdown()
+
+        self.preset_name.set(
+            name
+        )
+
+        self.status.config(
+            text=f"Preset saved: {name}"
+        )
+
+    def load_preset(
+        self,
+        preset_name=None
+    ):
+        name = (
+            preset_name
+            if preset_name is not None
+            else self.preset_name.get().strip()
+        )
+
+        if not name:
+            return
+
+        if name not in self.presets:
+            messagebox.showerror(
+                "Preset not found",
+                f"The preset '{name}' does not exist."
+            )
+
+            return
+
+        data = self.get_preset_data(
+            name
+        )
+
+        saved_path = data.get(
+            "rules_path",
+            ""
+        ).strip()
+
+        current_path = self.rules_path.get().strip()
+
+        if (
+            saved_path
+            and os.path.normcase(
+                os.path.abspath(saved_path)
+            )
+            != os.path.normcase(
+                os.path.abspath(current_path)
+            )
+        ):
+
+            if os.path.isdir(saved_path):
+
+                switch = messagebox.askyesno(
+                    "Switch rules directory?",
+                    (
+                        f"This preset was saved with a "
+                        f"different rules directory:\n\n"
+                        f"{saved_path}\n\n"
+                        f"Switch to that directory and "
+                        f"reload the rules?"
+                    )
+                )
+
+                if switch:
+
+                    self.rules_path.set(
+                        saved_path
+                    )
+
+                    self.pending_preset_load = name
+
+                    self.refresh_rules()
+
+                    return
+
+            else:
+
+                apply_current = messagebox.askyesno(
+                    "Rules directory unavailable",
+                    (
+                        f"The rules directory saved with "
+                        f"this preset no longer exists:\n\n"
+                        f"{saved_path}\n\n"
+                        f"Apply the preset to the currently "
+                        f"loaded rules instead?"
+                    )
+                )
+
+                if not apply_current:
+                    return
+
+        self.apply_preset(
+            name
+        )
+
+    def apply_preset(
+        self,
+        name
+    ):
+        data = self.get_preset_data(
+            name
+        )
+
+        states = data.get(
+            "rules",
+            {}
+        )
+
+        if not isinstance(
+            states,
+            dict
+        ):
+            states = {}
+
+        matched = 0
+
+        for rule in self.rule_entries:
+
+            key = (
+                f"{rule['source']}::"
+                f"{rule['name']}"
+            )
+
+            if key in states:
+
+                rule["enabled"] = bool(
+                    states[key]
+                )
+
+                matched += 1
+
+            else:
+
+                rule["enabled"] = True
+
+        self.preset_name.set(
+            name
+        )
+
+        self.filter_rules()
+
+        self.status.config(
+            text=(
+                f"Preset loaded: {name} "
+                f"({matched} matching rules)"
+            )
+        )
+
+    def delete_preset(self):
+        name = self.preset_name.get().strip()
+
+        if not name:
+            return
+
+        if name not in self.presets:
+            return
+
+        confirm = messagebox.askyesno(
+            "Delete preset",
+            f"Delete preset '{name}'?"
+        )
+
+        if not confirm:
+            return
+
+        del self.presets[name]
+
+        if not self.save_presets():
+            return
+
+        self.preset_name.set("")
+
+        self.update_preset_dropdown()
+
+        self.status.config(
+            text=f"Preset deleted: {name}"
+        )
+
+    def reset_rules(self):
+        for rule in self.rule_entries:
+            rule["enabled"] = True
+
+        self.preset_name.set("")
+
+        self.filter_rules()
+
+        self.status.config(
+            text="All rules enabled"
+        )
+
+    # ======================================================
     # Browse
     # ======================================================
 
     def browse_rules(self):
-
         path = filedialog.askdirectory(
             title="Select YARA rules directory"
         )
 
         if path:
 
-            self.rules_path.set(path)
+            self.rules_path.set(
+                path
+            )
+
             self.refresh_rules()
 
     def browse_file(self):
-
         path = filedialog.askopenfilename(
             title="Select file to scan"
         )
 
         if path:
-            self.target_path.set(path)
+            self.target_path.set(
+                path
+            )
 
     def browse_folder(self):
-
         path = filedialog.askdirectory(
             title="Select folder to scan"
         )
 
         if path:
-            self.target_path.set(path)
+            self.target_path.set(
+                path
+            )
 
     # ======================================================
     # Start scan
     # ======================================================
 
     def start_scan(self):
-
         rules_path = self.rules_path.get().strip()
         target_path = self.target_path.get().strip()
 
@@ -1511,7 +2301,6 @@ class YaraScannerApp(tk.Tk):
         target_path,
         enabled_rules
     ):
-
         try:
 
             rule_files = find_rule_files(
@@ -1564,7 +2353,6 @@ class YaraScannerApp(tk.Tk):
                 total,
                 result
             ):
-
                 self.scan_queue.put(
                     (
                         "progress",
@@ -1575,8 +2363,8 @@ class YaraScannerApp(tk.Tk):
                 )
 
             scan = scan_target(
-                rules,
                 target_path,
+                rules,
                 hash_all=self.hash_all.get(),
                 enabled_rules=enabled_rules,
                 progress_callback=progress_callback
@@ -1604,13 +2392,11 @@ class YaraScannerApp(tk.Tk):
     # ======================================================
 
     def process_scan_queue(self):
-
         try:
 
             while True:
 
                 message = self.scan_queue.get_nowait()
-
                 message_type = message[0]
 
                 if message_type == "status":
@@ -1624,6 +2410,14 @@ class YaraScannerApp(tk.Tk):
                     self.rules = message[1]
 
                     self.populate_rule_manager()
+
+                    if self.pending_preset_load:
+                        preset_name = self.pending_preset_load
+                        self.pending_preset_load = None
+
+                        self.apply_preset(
+                            preset_name
+                        )
 
                 elif message_type == "rules_error":
 
@@ -1655,7 +2449,9 @@ class YaraScannerApp(tk.Tk):
                     )
 
                     if result:
-                        self.add_result(result)
+                        self.add_result(
+                            result
+                        )
 
                 elif message_type == "complete":
 
@@ -1691,7 +2487,8 @@ class YaraScannerApp(tk.Tk):
                         self.status.config(
                             text=(
                                 f"Complete "
-                                f"({len(errors)} rule files failed)"
+                                f"({len(errors)} rule files "
+                                f"failed to compile)"
                             )
                         )
 
@@ -1738,7 +2535,6 @@ class YaraScannerApp(tk.Tk):
         self,
         result
     ):
-
         file_path = result["file"]
 
         if "error" in result:
@@ -1750,9 +2546,11 @@ class YaraScannerApp(tk.Tk):
         elif result["matched"]:
 
             status = "MATCH"
+
             rule_count = len(
                 result["rules"]
             )
+
             row_tag = "match"
 
         else:
@@ -1785,14 +2583,19 @@ class YaraScannerApp(tk.Tk):
         self,
         scan
     ):
-
         self.current_results = scan["results"]
 
         for item in self.results.get_children():
-            self.results.delete(item)
+
+            self.results.delete(
+                item
+            )
 
         for result in self.current_results:
-            self.add_result(result)
+
+            self.add_result(
+                result
+            )
 
         summary = scan["summary"]
 
@@ -1879,7 +2682,6 @@ class YaraScannerApp(tk.Tk):
         self,
         event=None
     ):
-
         selected = self.results.selection()
 
         if not selected:
@@ -1965,6 +2767,7 @@ class YaraScannerApp(tk.Tk):
             for rule in result["rules"]:
 
                 details.append("")
+
                 details.append(
                     "=" * 70
                 )
@@ -2021,7 +2824,6 @@ class YaraScannerApp(tk.Tk):
         self,
         text
     ):
-
         self.details.config(
             state="normal"
         )
@@ -2042,6 +2844,5 @@ class YaraScannerApp(tk.Tk):
 
 
 if __name__ == "__main__":
-
     app = YaraScannerApp()
     app.mainloop()

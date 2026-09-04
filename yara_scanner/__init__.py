@@ -1,1 +1,3 @@
-# hi :3c
+"""
+YARA Scanner package.
+"""

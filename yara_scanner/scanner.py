@@ -1,6 +1,6 @@
-import fnmatch
 import hashlib
 import math
+import mimetypes
 import os
 import time
 
@@ -8,186 +8,162 @@ import time
 def calculate_sha256(file_path):
     sha256 = hashlib.sha256()
 
-    with open(file_path, "rb") as file:
-        while chunk := file.read(4096):
+    with open(file_path, "rb") as f:
+        for chunk in iter(
+            lambda: f.read(1024 * 1024),
+            b""
+        ):
             sha256.update(chunk)
 
     return sha256.hexdigest()
 
 
 def calculate_entropy(file_path):
-    """
-    Calculate Shannon entropy for the entire file.
+    with open(file_path, "rb") as f:
+        data = f.read()
 
-    Returns a value between 0.0 and 8.0.
-    """
-
-    counts = [0] * 256
-    total = 0
-
-    with open(file_path, "rb") as file:
-
-        while chunk := file.read(1024 * 1024):
-
-            total += len(chunk)
-
-            for byte in chunk:
-                counts[byte] += 1
-
-    if total == 0:
+    if not data:
         return 0.0
 
+    frequencies = [0] * 256
+
+    for byte in data:
+        frequencies[byte] += 1
+
+    length = len(data)
     entropy = 0.0
 
-    for count in counts:
+    for count in frequencies:
+        if count:
+            probability = count / length
 
-        if count == 0:
-            continue
+            entropy -= (
+                probability *
+                math.log2(probability)
+            )
 
-        probability = count / total
-
-        entropy -= (
-            probability
-            * math.log2(probability)
-        )
-
-    return round(entropy, 4)
+    return entropy
 
 
 def detect_file_type(file_path):
-    """
-    Basic content-based file type detection.
+    mime_type, _ = mimetypes.guess_type(
+        file_path
+    )
 
-    This intentionally avoids external dependencies.
-    """
+    if mime_type:
+        return mime_type
 
-    try:
+    extension = os.path.splitext(
+        file_path
+    )[1].lower()
 
-        with open(file_path, "rb") as file:
-            header = file.read(16)
+    if extension:
+        return extension.lstrip(".")
 
-        # Windows PE
-        if header.startswith(b"MZ"):
-            return "Windows PE executable"
-
-        # ELF
-        if header.startswith(b"\x7fELF"):
-            return "ELF executable"
-
-        # PDF
-        if header.startswith(b"%PDF"):
-            return "PDF document"
-
-        # ZIP
-        if header.startswith(b"PK\x03\x04"):
-            return "ZIP archive"
-
-        # GZIP
-        if header.startswith(b"\x1f\x8b"):
-            return "GZIP compressed data"
-
-        # PNG
-        if header.startswith(
-            b"\x89PNG\r\n\x1a\n"
-        ):
-            return "PNG image"
-
-        # JPEG
-        if header.startswith(b"\xff\xd8\xff"):
-            return "JPEG image"
-
-        # GIF
-        if header.startswith(b"GIF87a"):
-            return "GIF image"
-
-        if header.startswith(b"GIF89a"):
-            return "GIF image"
-
-        # RAR
-        if header.startswith(b"Rar!\x1a\x07"):
-            return "RAR archive"
-
-        # 7-Zip
-        if header.startswith(
-            b"7z\xbc\xaf'\x1c"
-        ):
-            return "7-Zip archive"
-
-        # Windows shortcut
-        if (
-            len(header) >= 4
-            and header[:4] == b"\x4c\x00\x00\x00"
-        ):
-            return "Windows shortcut"
-
-        # Otherwise use extension
-        extension = os.path.splitext(
-            file_path
-        )[1].lower()
-
-        extension_types = {
-            ".txt": "Text file",
-            ".log": "Log file",
-            ".json": "JSON document",
-            ".xml": "XML document",
-            ".html": "HTML document",
-            ".htm": "HTML document",
-            ".py": "Python source",
-            ".js": "JavaScript source",
-            ".ps1": "PowerShell script",
-            ".bat": "Batch script",
-            ".cmd": "Windows command script",
-            ".dll": "Windows DLL",
-            ".sys": "Windows system file",
-            ".doc": "Microsoft Word document",
-            ".docx": "Microsoft Word document",
-            ".xls": "Microsoft Excel document",
-            ".xlsx": "Microsoft Excel document",
-            ".ppt": "Microsoft PowerPoint document",
-            ".pptx": "Microsoft PowerPoint document",
-            ".zip": "ZIP archive",
-            ".rar": "RAR archive",
-            ".7z": "7-Zip archive",
-        }
-
-        return extension_types.get(
-            extension,
-            "Unknown"
-        )
-
-    except Exception:
-        return "Unknown"
+    return "unknown"
 
 
-def rule_matches_tags(match, requested_tags):
-
-    if not requested_tags:
+def rule_matches_tags(
+    rule,
+    selected_tags
+):
+    if not selected_tags:
         return True
 
-    rule_tags = {
-        tag.lower()
-        for tag in match.tags
-    }
-
-    requested_tags = {
-        tag.lower()
-        for tag in requested_tags
-    }
-
     return bool(
-        rule_tags & requested_tags
+        set(rule.tags) &
+        set(selected_tags)
     )
 
 
-def scan_file(
-    rules,
-    file_path,
-    hash_all=False,
-    requested_tags=None,
-    enabled_rules=None
+def _get_enabled_rules_for_ruleset(
+    compiled_rules,
+    enabled_rules
 ):
+    """
+    Return the enabled rule identifiers that
+    exist in this compiled ruleset.
 
-    scan_start = time.perf_counter()
+    None means all rules are enabled.
+    """
+
+    if enabled_rules is None:
+        return None
+
+    identifiers = set()
+
+    for rule in compiled_rules:
+        identifiers.add(
+            rule.identifier
+        )
+
+    return identifiers & enabled_rules
+
+
+def _extract_string_matches(match):
+    """
+    Convert yara-python StringMatch objects
+    into the flat structure expected by the GUI.
+
+    yara-python 4.5.x stores actual match
+    occurrences in StringMatch.instances.
+    """
+
+    string_matches = []
+
+    for string_match in match.strings:
+
+        instances = getattr(
+            string_match,
+            "instances",
+            []
+        )
+
+        for instance in instances:
+
+            matched_data = getattr(
+                instance,
+                "matched_data",
+                b""
+            )
+
+            if isinstance(
+                matched_data,
+                bytes
+            ):
+                data = matched_data.hex()
+
+            else:
+                data = str(
+                    matched_data
+                )
+
+            string_matches.append(
+                {
+                    "identifier": (
+                        string_match.identifier
+                    ),
+                    "offset": getattr(
+                        instance,
+                        "offset",
+                        None
+                    ),
+                    "length": len(matched_data),
+                    "data": data,
+                }
+            )
+
+    return string_matches
+
+
+def scan_file(
+    file_path,
+    rules,
+    enabled_rules=None,
+    selected_tags=None,
+    hash_all=False,
+):
+    start_time = time.time()
 
     try:
 
@@ -199,237 +175,259 @@ def scan_file(
             file_path
         )
 
-        entropy = calculate_entropy(
-            file_path
-        )
-
-        all_matches = []
+        matches = []
 
         for rule_set in rules:
 
-            matches = rule_set["compiled"].match(
+            compiled = rule_set["compiled"]
+            source = rule_set["file"]
+
+            enabled_for_ruleset = (
+                _get_enabled_rules_for_ruleset(
+                    compiled,
+                    enabled_rules
+                )
+            )
+
+            if (
+                enabled_rules is not None
+                and not enabled_for_ruleset
+            ):
+                continue
+
+            yara_matches = compiled.match(
                 file_path
             )
 
-            for match in matches:
-
-                # ------------------------------------------
-                # Enabled rule filtering
-                # ------------------------------------------
+            for match in yara_matches:
 
                 if (
                     enabled_rules is not None
-                    and match.rule not in enabled_rules
+                    and match.rule
+                    not in enabled_for_ruleset
                 ):
                     continue
 
-                if not rule_matches_tags(
-                    match,
-                    requested_tags
+                if (
+                    selected_tags
+                    and not rule_matches_tags(
+                        match,
+                        selected_tags
+                    )
                 ):
                     continue
 
-                all_matches.append({
-                    "match": match,
-                    "source": rule_set["file"]
-                })
+                matches.append(
+                    {
+                        "name": match.rule,
+                        "namespace": match.namespace,
+                        "tags": list(
+                            match.tags
+                        ),
+                        "meta": dict(
+                            match.meta
+                        ),
+                        "strings": (
+                            _extract_string_matches(
+                                match
+                            )
+                        ),
+                        "source": source,
+                    }
+                )
 
-        matched = len(all_matches) > 0
-
-        file_hash = None
-
-        if matched or hash_all:
-
-            file_hash = calculate_sha256(
-                file_path
-            )
-
-        scan_duration = (
-            time.perf_counter()
-            - scan_start
+        matched = bool(
+            matches
         )
 
         result = {
             "file": file_path,
-            "size": file_size,
-            "file_type": file_type,
-            "entropy": entropy,
-            "sha256": file_hash,
-            "matched": matched,
-            "scan_duration_seconds": round(
-                scan_duration,
-                4
+
+            "name": os.path.basename(
+                file_path
             ),
-            "rules": []
+
+            "size": file_size,
+
+            "file_type": file_type,
+
+            "matched": matched,
+
+            "rules": matches,
+
+            "entropy": (
+                calculate_entropy(
+                    file_path
+                )
+                if matched
+                else None
+            ),
+
+            "sha256": (
+                calculate_sha256(
+                    file_path
+                )
+                if matched or hash_all
+                else None
+            ),
+
+            "scan_duration_seconds": (
+                time.time() -
+                start_time
+            ),
         }
-
-        for match_data in all_matches:
-
-            match = match_data["match"]
-            source = match_data["source"]
-
-            rule_data = {
-                "name": match.rule,
-                "source": source,
-                "tags": list(match.tags),
-                "meta": match.meta,
-                "strings": []
-            }
-
-            for string_match in match.strings:
-
-                for instance in string_match.instances:
-
-                    rule_data["strings"].append({
-                        "identifier":
-                            string_match.identifier,
-
-                        "offset":
-                            instance.offset,
-
-                        "data":
-                            instance.matched_data.decode(
-                                "utf-8",
-                                errors="replace"
-                            )
-                    })
-
-            result["rules"].append(
-                rule_data
-            )
 
         return result
 
-    except Exception as error:
+    except Exception as exc:
 
-        scan_duration = (
-            time.perf_counter()
-            - scan_start
-        )
+        try:
+            file_size = (
+                os.path.getsize(
+                    file_path
+                )
+                if os.path.isfile(
+                    file_path
+                )
+                else 0
+            )
+        except OSError:
+            file_size = 0
+
+        try:
+            file_type = detect_file_type(
+                file_path
+            )
+        except Exception:
+            file_type = "unknown"
 
         return {
             "file": file_path,
-            "error": str(error),
-            "scan_duration_seconds": round(
-                scan_duration,
-                4
-            )
+
+            "name": os.path.basename(
+                file_path
+            ),
+
+            "size": file_size,
+
+            "file_type": file_type,
+
+            "matched": False,
+
+            "rules": [],
+
+            "entropy": None,
+
+            "sha256": None,
+
+            "scan_duration_seconds": (
+                time.time() -
+                start_time
+            ),
+
+            "error": str(exc),
         }
 
 
 def collect_files(
-    target,
-    exclude_patterns=None
+    target_path,
+    exclusions=None
 ):
+    exclusions = exclusions or set()
+
+    target_path = os.path.abspath(
+        target_path
+    )
+
+    normalized_exclusions = {
+        os.path.abspath(path)
+        for path in exclusions
+    }
+
+    if os.path.isfile(
+        target_path
+    ):
+
+        if (
+            target_path
+            in normalized_exclusions
+        ):
+            return []
+
+        return [
+            target_path
+        ]
+
+    if not os.path.isdir(
+        target_path
+    ):
+        return []
 
     files = []
-    excluded = []
 
-    if exclude_patterns is None:
-        exclude_patterns = []
+    for root, dirs, filenames in os.walk(
+        target_path
+    ):
 
-    def should_exclude(path):
-
-        normalized_path = os.path.normpath(
-            path
-        )
-
-        filename = os.path.basename(
-            path
-        )
-
-        for pattern in exclude_patterns:
-
-            if fnmatch.fnmatch(
-                filename,
-                pattern
-            ):
-                return True
-
-            if fnmatch.fnmatch(
-                normalized_path,
-                pattern
-            ):
-                return True
-
-            path_parts = normalized_path.split(
-                os.sep
+        dirs[:] = [
+            directory
+            for directory in dirs
+            if os.path.abspath(
+                os.path.join(
+                    root,
+                    directory
+                )
             )
+            not in normalized_exclusions
+        ]
 
-            if any(
-                fnmatch.fnmatch(
-                    part,
-                    pattern
-                )
-                for part in path_parts
-            ):
-                return True
+        for filename in filenames:
 
-        return False
-
-    if os.path.isfile(target):
-
-        if should_exclude(target):
-            excluded.append(target)
-        else:
-            files.append(target)
-
-    elif os.path.isdir(target):
-
-        for root, dirs, filenames in os.walk(target):
-
-            dirs[:] = [
-                directory
-                for directory in dirs
-                if not should_exclude(
-                    os.path.join(
-                        root,
-                        directory
-                    )
-                )
-            ]
-
-            for filename in filenames:
-
-                file_path = os.path.join(
+            file_path = os.path.abspath(
+                os.path.join(
                     root,
                     filename
                 )
+            )
 
-                if should_exclude(file_path):
-                    excluded.append(file_path)
-                else:
-                    files.append(file_path)
+            if (
+                file_path
+                in normalized_exclusions
+            ):
+                continue
 
-    return files, excluded
+            files.append(
+                file_path
+            )
+
+    return files
 
 
 def scan_target(
+    target_path,
     rules,
-    target,
-    hash_all=False,
-    requested_tags=None,
-    exclude_patterns=None,
     enabled_rules=None,
-    progress_callback=None
+    selected_tags=None,
+    hash_all=False,
+    exclusions=None,
+    progress_callback=None,
 ):
+    """
+    Scan a file or directory.
 
-    files, excluded_files = collect_files(
-        target,
-        exclude_patterns
+    Progress callback receives exactly:
+
+        callback(current, total, result)
+    """
+
+    files = collect_files(
+        target_path,
+        exclusions=exclusions
     )
 
     results = []
 
-    total_files = len(files)
-
-    if progress_callback:
-
-        progress_callback(
-            0,
-            total_files,
-            None
-        )
+    total = len(files)
 
     for index, file_path in enumerate(
         files,
@@ -437,58 +435,59 @@ def scan_target(
     ):
 
         result = scan_file(
-            rules,
             file_path,
+            rules,
+            enabled_rules=enabled_rules,
+            selected_tags=selected_tags,
             hash_all=hash_all,
-            requested_tags=requested_tags,
-            enabled_rules=enabled_rules
         )
 
-        results.append(result)
+        results.append(
+            result
+        )
 
         if progress_callback:
 
             progress_callback(
                 index,
-                total_files,
+                total,
                 result
             )
 
-    summary = {
-        "files_found":
-            len(files) + len(excluded_files),
+    matched_count = sum(
+        1
+        for result in results
+        if result.get("matched")
+    )
 
-        "files_scanned":
-            len(results),
+    failed_count = sum(
+        1
+        for result in results
+        if result.get("error")
+    )
 
-        "files_excluded":
-            len(excluded_files),
-
-        "files_matched":
-            sum(
-                1
-                for result in results
-                if "error" not in result
-                and result["matched"]
-            ),
-
-        "rules_triggered":
-            sum(
-                len(result["rules"])
-                for result in results
-                if "error" not in result
-            ),
-
-        "files_failed":
-            sum(
-                1
-                for result in results
-                if "error" in result
+    rules_triggered = sum(
+        len(
+            result.get(
+                "rules",
+                []
             )
+        )
+        for result in results
+    )
+
+    summary = {
+        "files_scanned": total,
+
+        "files_matched": matched_count,
+
+        "rules_triggered": rules_triggered,
+
+        "files_failed": failed_count,
     }
 
     return {
         "results": results,
+
         "summary": summary,
-        "excluded_files": excluded_files
     }

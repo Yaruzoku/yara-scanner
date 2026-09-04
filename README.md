@@ -2,7 +2,7 @@
 
 A lightweight GUI and command-line YARA scanning utility for Windows.
 
-YARA Scanner provides a simple interface for scanning individual files or directories with YARA rules, viewing detailed rule matches, inspecting matched strings and metadata, calculating file hashes and entropy, and exporting scan results to JSON.
+YARA Scanner provides a simple interface for scanning individual files or directories with YARA rules, viewing detailed rule matches, inspecting matched strings and metadata, calculating file hashes and entropy, managing rule selections, and exporting scan results to JSON.
 
 > **Disclaimer:** This project is not an original concept. It was created as a learning and personal cybersecurity project, drawing inspiration from existing YARA-based malware analysis and scanning tools. The implementation, interface, and features of this project are my own work.
 
@@ -16,7 +16,12 @@ YARA Scanner provides a simple interface for scanning individual files or direct
 * Support for `.yar` and `.yara` rule files
 * YARA `include` dependency handling
 * Rule tags and metadata
-* Individual rule selection
+* Rule Management interface
+* Individual rule enable/disable selection
+* Enable or disable all rules at once
+* Rule search and filtering
+* Rule state persistence when refreshing rules
+* Rule presets for quickly saving and restoring rule configurations
 * SHA-256 file hashing
 * Shannon entropy calculation
 * Basic file type detection
@@ -25,31 +30,52 @@ YARA Scanner provides a simple interface for scanning individual files or direct
 * Scan progress information
 * Rule statistics
 * JSON report generation
+* Dark mode
 * Command-line interface
 * Graphical user interface
 * Standalone Windows executable
 
 ---
 
-## Project Structure
+# Graphical Interface
 
-```text
-Yara Scanner/
-├── yara_scanner/
-│   ├── __init__.py
-│   ├── scanner.py
-│   ├── rules.py
-│   └── reporting.py
-│
-├── gui/
-│   └── app.py
-│
-├── requirements.txt
-├── yara-scan.py
-└── README.md
-```
+The graphical interface provides a convenient way to configure and run scans without using the command line.
 
-The YARA rules themselves are **not required to be stored inside this project**. A rule directory can be selected/provided separately when running a scan.
+### Rule Management
+
+The Rule Management panel allows individual YARA rules to be controlled before a scan.
+
+Available features include:
+
+* Search and filter loaded rules
+* Enable individual rules
+* Disable individual rules
+* Enable all rules
+* Disable all rules
+* View rule information and metadata
+* Refresh the loaded rule collection
+* Preserve enabled/disabled rule state when refreshing
+
+This makes it possible to work with large rule collections without having to run every loaded rule for every scan.
+
+### Rule Presets
+
+Rule configurations can be saved as presets.
+
+A preset stores the enabled/disabled state of the rules, allowing commonly used rule configurations to be quickly restored later.
+
+Presets can be:
+
+* Saved
+* Loaded
+* Deleted
+* Reset to the default rule configuration
+
+This is useful when switching between different rule collections or analysis purposes.
+
+### Dark Mode
+
+The GUI supports dark mode for a more comfortable interface in low-light environments.
 
 ---
 
@@ -196,8 +222,6 @@ Exit codes:
 
 ---
 
-
-
 # YARA Rules
 
 The scanner does not require a specific YARA rule collection.
@@ -261,6 +285,28 @@ When analyzing potentially malicious files:
 * Be careful when handling live malware samples.
 
 The scanner itself performs static file analysis; it does not attempt to execute scanned samples.
+
+---
+
+# Project Structure
+
+```text
+Yara Scanner/
+├── yara_scanner/
+│   ├── __init__.py
+│   ├── scanner.py
+│   ├── rules.py
+│   └── reporting.py
+│
+├── gui/
+│   └── app.py
+│
+├── requirements.txt
+├── yara-scan.py
+└── README.md
+```
+
+The YARA rules themselves are **not required to be stored inside this project**. A rule directory can be selected/provided separately when running a scan.
 
 ---
 
