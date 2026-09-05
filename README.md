@@ -288,28 +288,6 @@ The scanner itself performs static file analysis; it does not attempt to execute
 
 ---
 
-# Project Structure
-
-```text
-Yara Scanner/
-├── yara_scanner/
-│   ├── __init__.py
-│   ├── scanner.py
-│   ├── rules.py
-│   └── reporting.py
-│
-├── gui/
-│   └── app.py
-│
-├── requirements.txt
-├── yara-scan.py
-└── README.md
-```
-
-The YARA rules themselves are **not required to be stored inside this project**. A rule directory can be selected/provided separately when running a scan.
-
----
-
 # Project Status
 
 This is an ongoing personal cybersecurity project.
